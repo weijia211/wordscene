@@ -118,7 +118,7 @@
   function addWords(list) {
     const db = load();
     const byWord = new Map(db.words.map((w) => [w.word, w]));
-    const result = { added: 0, updated: 0, skipped: 0 };
+    const result = { added: 0, updated: 0, skipped: 0, needMeaning: [] };
 
     for (const item of list) {
       const key = normalize(item.word);
@@ -132,9 +132,9 @@
         for (const f of ['meaning', 'phonetic']) {
           if (!exist[f] && item[f]) { exist[f] = item[f]; touched = true; }
         }
-        if (!exist.phonetic && item.phonetic) { exist.phonetic = item.phonetic; touched = true; }
         if (touched) result.updated++;
         else result.skipped++;
+        if (!exist.meaning) result.needMeaning.push(key);
         continue;
       }
       const rec = {
@@ -150,20 +150,74 @@
       db.words.push(rec);
       byWord.set(key, rec);
       result.added++;
+      if (!rec.meaning) result.needMeaning.push(key);
     }
 
     save();
+    // 去重
+    result.needMeaning = Array.from(new Set(result.needMeaning));
     return result;
   }
 
-  function addWordsFromText(text) {
+  /** 把模型补全的释义写回词库 */
+  function applyDefinitions(items) {
+    const db = load();
+    const byWord = new Map(db.words.map((w) => [w.word, w]));
+    let n = 0;
+    for (const it of items || []) {
+      const w = byWord.get(normalize(it.word));
+      if (!w) continue;
+      if (it.meaning && !w.meaning) { w.meaning = it.meaning; n++; }
+      if (it.phonetic && !w.phonetic) w.phonetic = it.phonetic;
+    }
+    save();
+    return n;
+  }
+
+  /**
+   * 给词库里缺释义的词补上（需要模型）。
+   * @param {string[]} [onlyWords] 只补这些词；不传则补全库
+   */
+  async function enrichMissing(llm, onlyWords) {
+    const db = load();
+    const pool = onlyWords && onlyWords.length
+      ? db.words.filter((w) => onlyWords.includes(w.word) && !w.meaning)
+      : db.words.filter((w) => !w.meaning);
+
+    if (!pool.length) return { enriched: 0, total: 0, failed: [] };
+
+    const out = await WordGen.enrichWords(pool, llm || db.settings.llm);
+    const enriched = applyDefinitions(out.items);
+    return { enriched, total: pool.length, failed: out.failed };
+  }
+
+  async function addWordsFromText(text, llm) {
     const items = WordParse.parseWordLines(text);
     if (!items.length) {
       const err = new Error('没有识别到英文单词。每行一个词就行，也可以写成「abandon, v. 放弃」。');
       err.code = 'NO_WORDS';
       throw err;
     }
-    return Object.assign({ parsed: items.length }, addWords(items));
+
+    const result = addWords(items);
+    const info = Object.assign({ parsed: items.length }, result);
+
+    // 没写释义的词，自动用模型补全
+    if (result.needMeaning.length) {
+      const settings = llm || getSettings().llm;
+      if (settings && settings.apiKey) {
+        try {
+          const filled = await enrichMissing(settings, result.needMeaning);
+          info.definitions = filled.enriched;
+        } catch (err) {
+          info.definitionsError = err.message;
+        }
+      } else {
+        info.definitionsSkipped = true;
+      }
+    }
+
+    return info;
   }
 
   function listWords() {
@@ -264,6 +318,7 @@
             style: body.style || preset.style,
             wordsPerSentence: body.wordsPerSentence || preset.wordsPerSentence,
             extra: body.extra || '',
+            withTranslation: body.withTranslation !== false,
           },
           llm
         );
@@ -276,6 +331,7 @@
             engine: article.engine,
             paragraphs: article.paragraphs,
             words: article.words,
+            translations: article.translations || [],
             missing: article.missing,
             wordIds: group.map((w) => w.id),
             extra: body.extra || '',
@@ -352,6 +408,8 @@
     updateSettings,
     addWords,
     addWordsFromText,
+    applyDefinitions,
+    enrichMissing,
     listWords,
     setMastered,
     removeWords,
