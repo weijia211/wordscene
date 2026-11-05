@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>词境 · 用短文记住单词</title>
+<link rel="stylesheet" href="./style.css">
+<link rel="manifest" href="./manifest.webmanifest">
+
+<!-- iOS 添加到主屏幕 -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="词境">
+<meta name="theme-color" content="#2f6f4f">
+<link rel="apple-touch-icon" href="./icon-180.png">
+<link rel="icon" type="image/png" sizes="192x192" href="./icon-192.png">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">词境</span>
+    <span class="tagline">把要背的词，编成读得下去的文章</span>
+  </div>
+  <div class="stats" id="stats"></div>
+</header>
+
+<nav class="tabs" id="tabs">
+  <button class="tab active" data-tab="library">词库</button>
+  <button class="tab" data-tab="write">生成文章</button>
+  <button class="tab" data-tab="settings">设置</button>
+</nav>
+
+<main>
+
+  <!-- ============ 词库 ============ -->
+  <section class="view active" id="view-library">
+
+    <article class="card">
+      <h2>粘贴单词</h2>
+      <p class="muted">
+        每行一个词。可以直接带释义：<code>abandon, v. 放弃</code>、<code>abandon&nbsp;&nbsp;放弃</code>、
+        <code>abandon /əˈbændən/ v. 放弃</code> 都能认。
+        带序号、带项目符号、带音标都行；不以英文开头的行会被忽略。
+      </p>
+      <textarea id="manual-words" rows="7" placeholder="abandon, v. 放弃，抛弃&#10;brittle, adj. 易碎的&#10;candid&#10;1. deteriorate /dɪˈtɪəriəreɪt/ vi. 恶化"></textarea>
+      <div class="row" style="margin-top:12px">
+        <button class="btn primary" id="btn-add-words">加入词库</button>
+        <button class="btn ghost" id="btn-clear-input">清空输入框</button>
+        <span class="hint" id="add-status"></span>
+      </div>
+    </article>
+
+    <div class="row toolbar">
+      <input type="search" id="word-search" placeholder="搜索单词或释义…">
+      <select id="word-filter">
+        <option value="all">全部</option>
+        <option value="new">未掌握</option>
+        <option value="mastered">已掌握</option>
+      </select>
+      <button class="btn" id="btn-mastered">标记已掌握</button>
+      <button class="btn danger" id="btn-delete-words">删除</button>
+    </div>
+
+    <div id="word-list" class="word-list"></div>
+  </section>
+
+  <!-- ============ 生成 ============ -->
+  <section class="view" id="view-write">
+    <article class="card">
+      <h2>生成串词短文</h2>
+      <div class="row">
+        <label class="field">
+          <span>生成几篇</span>
+          <input type="number" id="gen-count" value="1" min="1" max="10">
+        </label>
+        <label class="field">
+          <span>每篇用几个词</span>
+          <input type="number" id="gen-per" value="12" min="2" max="40">
+        </label>
+        <label class="field">
+          <span>难度</span>
+          <select id="gen-level"></select>
+        </label>
+        <label class="field">
+          <span>文体</span>
+          <select id="gen-style"></select>
+        </label>
+        <label class="field">
+          <span>每句含词数</span>
+          <input type="number" id="gen-density" value="3" min="1" max="5">
+        </label>
+      </div>
+      <div class="row">
+        <label class="field grow">
+          <span>额外要求（可空）</span>
+          <input type="text" id="gen-extra" placeholder="例如：写一次面试经历，用现在时">
+        </label>
+        <label class="check"><input type="checkbox" id="gen-include-mastered"> 包含已掌握的词</label>
+        <label class="check"><input type="checkbox" id="gen-fresh" checked> 优先没用过的词</label>
+      </div>
+      <div class="row">
+        <button class="btn primary" id="btn-generate">生成</button>
+        <span class="hint" id="gen-status"></span>
+      </div>
+    </article>
+
+    <div class="split">
+      <aside class="article-list" id="article-list"></aside>
+      <article class="reader" id="reader">
+        <div class="empty">左边选一篇文章开始读</div>
+      </article>
+    </div>
+  </section>
+
+  <!-- ============ 设置 ============ -->
+  <section class="view" id="view-settings">
+    <article class="card">
+      <h2>模型接口</h2>
+      <p class="muted">
+        填任意 OpenAI 兼容接口（DeepSeek、OpenAI、通义、本地 Ollama 等）。Key 只存在这台设备的浏览器里。
+        不填也能用：会退回<strong>离线模板</strong>模式，但读起来像练习册。
+      </p>
+      <div class="row">
+        <label class="field grow">
+          <span>Base URL</span>
+          <input type="text" id="set-baseurl" placeholder="https://api.deepseek.com/v1">
+        </label>
+        <label class="field">
+          <span>模型</span>
+          <input type="text" id="set-model" placeholder="deepseek-chat">
+        </label>
+      </div>
+      <div class="row">
+        <label class="field grow">
+          <span>API Key</span>
+          <input type="password" id="set-apikey" placeholder="sk-...">
+        </label>
+        <button class="btn" id="btn-test-llm">测试连接</button>
+        <button class="btn primary" id="btn-save-settings">保存</button>
+      </div>
+      <div class="hint" id="llm-status"></div>
+    </article>
+
+    <article class="card">
+      <h2>数据备份</h2>
+      <p class="muted">
+        所有数据只存在<b>这台设备</b>的浏览器里，不上传任何地方。
+        换设备、清缓存、重装前记得导出一份；换到 iPad 上就用这个文件导入。
+      </p>
+      <div class="row">
+        <button class="btn" id="btn-export-data">导出备份</button>
+        <button class="btn" id="btn-import-data">导入备份</button>
+        <button class="btn danger" id="btn-clear-all">清空全部</button>
+        <input type="file" id="import-file" accept="application/json,.json" hidden>
+      </div>
+      <div class="hint" id="storage-info"></div>
+    </article>
+
+    <article class="card">
+      <h2>说明</h2>
+      <ul class="muted small">
+        <li>生成时优先挑<strong>还没被用过</strong>的词，每生成一次就自动往下轮，形成复习节奏。</li>
+        <li>文中目标词会高亮，可一键「遮挡自测」；导出支持 Markdown / Word / HTML / 纯文本。</li>
+        <li>添加到主屏幕后可以离线打开，但<strong>生成文章需要联网</strong>（要调模型）。</li>
+        <li>iOS 上清理 Safari 数据会连本地词库一起清掉，定期导出备份。</li>
+      </ul>
+    </article>
+  </section>
+
+</main>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="./core/words.js"></script>
+<script src="./core/generate.js"></script>
+<script src="./core/exporters.js"></script>
+<script src="./core/store.js"></script>
+<script src="./app.js"></script>
+</body>
+</html>
