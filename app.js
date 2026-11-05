@@ -227,7 +227,26 @@ function renderReader() {
     return;
   }
 
-  const body = a.paragraphs.map((p) => `<p>${highlight(p, a.words)}</p>`).join('');
+  const zhMap = new Map();
+  for (const t of a.translations || []) {
+    const key = Gen.sentenceKey(t.en);
+    if (key && !zhMap.has(key)) zhMap.set(key, t.zh);
+  }
+
+  const body = a.paragraphs
+    .map((p) => {
+      const sentences = Gen.splitSentences(p);
+      const parts = sentences.map((s) => {
+        const zh = zhMap.get(Gen.sentenceKey(s)) || '';
+        return zh
+          ? `<span class="sent has-zh" data-zh="${esc(zh)}">${highlight(s, a.words)}</span>`
+          : `<span class="sent">${highlight(s, a.words)}</span>`;
+      });
+      return `<p>${parts.join(' ')}</p>`;
+    })
+    .join('');
+
+  const zhCount = (a.translations || []).length;
 
   holder.className = 'reader';
   holder.innerHTML = `
@@ -257,6 +276,7 @@ function renderReader() {
 
     <div class="reader-actions">
       <button class="btn primary" id="btn-quiz">遮挡自测</button>
+      ${zhCount ? '<button class="btn" id="btn-zh">显示全部句意</button>' : ''}
       <button class="btn" data-export="md">Markdown</button>
       <button class="btn" data-export="docx">Word</button>
       <button class="btn" data-export="html">HTML</button>
@@ -300,6 +320,42 @@ function renderReader() {
     renderReader();
     toast('已删除');
   };
+
+  /* 点句子看中文 */
+  const toggleZh = (sentEl, force) => {
+    const next = sentEl.nextElementSibling;
+    const existing = next && next.classList && next.classList.contains('zh-line') ? next : null;
+    const wantShow = force === undefined ? !existing : force;
+
+    if (!wantShow) {
+      if (existing) existing.remove();
+      return;
+    }
+    if (existing) return;
+
+    const line = document.createElement('span');
+    line.className = 'zh-line';
+    line.textContent = sentEl.dataset.zh;
+    sentEl.after(line);
+  };
+
+  holder.querySelectorAll('.sent.has-zh').forEach((el) => {
+    el.addEventListener('click', (ev) => {
+      // 自测模式下点单词是"揭开"，不要顺带展开译文
+      if (holder.classList.contains('quiz') && ev.target.tagName === 'MARK') return;
+      toggleZh(el);
+    });
+  });
+
+  const zhBtn = $('#btn-zh');
+  if (zhBtn) {
+    let allShown = false;
+    zhBtn.onclick = () => {
+      allShown = !allShown;
+      holder.querySelectorAll('.sent.has-zh').forEach((el) => toggleZh(el, allShown));
+      zhBtn.textContent = allShown ? '隐藏全部句意' : '显示全部句意';
+    };
+  }
 }
 
 function doExport(article, fmt) {
@@ -376,19 +432,44 @@ function bindEvents() {
       const text = $('#manual-words').value;
       if (!text.trim()) return toast('先输入单词', true);
 
-      const out = Store.addWordsFromText(text);
+      const status = $('#add-status');
+      status.className = 'hint';
+      status.textContent = '正在识别…';
+
+      const out = await Store.addWordsFromText(text);
       $('#manual-words').value = '';
       refresh();
 
-      const status = $('#add-status');
-      status.className = 'hint ok';
-      status.textContent = `识别 ${out.parsed} 行，新增 ${out.added} 个，已存在 ${out.updated + out.skipped} 个`;
+      let msg = `识别 ${out.parsed} 行，新增 ${out.added} 个，已存在 ${out.updated + out.skipped} 个`;
+      if (out.definitions) msg += `，已补全 ${out.definitions} 个释义`;
+      else if (out.definitionsSkipped) msg += '（未配置模型，释义留空）';
+      else if (out.definitionsError) msg += `（补全释义失败：${out.definitionsError}）`;
+
+      status.className = 'hint ' + (out.definitionsError ? 'error' : 'ok');
+      status.textContent = msg;
       toast(`新增 ${out.added} 个单词`);
     }).catch((err) => {
       const status = $('#add-status');
       status.className = 'hint error';
       status.textContent = err.message;
     });
+  };
+
+  $('#btn-enrich').onclick = (e) => {
+    const missing = state.words.filter((w) => !w.meaning).length;
+    if (!missing) return toast('所有单词都有释义了', true);
+    if (!Store.getSettings().llm.apiKey) return toast('先在设置页配置模型，才能自动补释义', true);
+
+    withBusy(e.target, `补全中…`, async () => {
+      const status = $('#add-status');
+      status.className = 'hint';
+      status.textContent = `正在为 ${missing} 个词补释义…`;
+      const out = await Store.enrichMissing();
+      refresh();
+      status.className = 'hint ok';
+      status.textContent = `补全了 ${out.enriched} 个释义（共 ${out.total} 个缺释义）`;
+      if (out.failed && out.failed.length) toast(`${out.failed.length} 个词补全失败`, true);
+    }).catch((err) => toast(err.message, true));
   };
 
   $('#btn-mastered').onclick = () => {
@@ -424,6 +505,7 @@ function bindEvents() {
         extra: $('#gen-extra').value.trim(),
         includeMastered: $('#gen-include-mastered').checked,
         excludeUsed: $('#gen-fresh').checked,
+        withTranslation: $('#gen-translate').checked,
       });
 
       refresh();
