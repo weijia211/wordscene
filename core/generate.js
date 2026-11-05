@@ -30,6 +30,24 @@
     const lv = LEVELS[level] || LEVELS.cet4;
     const st = STYLES[style] || STYLES.story;
     const list = words.map((w) => w.word).join(', ');
+    const withTranslation = Boolean(opts && opts.withTranslation);
+
+    const schema = [
+      '{',
+      '  "title": "英文标题（不超过 10 词）",',
+      '  "paragraphs": ["第一段", "第二段", "..."],',
+      '  "words": [',
+      '    {"word": "单词原形", "phonetic": "音标，不确定就留空", "meaning": "中文释义，含词性", "sentence": "文中出现该词的那一句原文"}',
+      '  ]' + (withTranslation ? ',' : ''),
+      ...(withTranslation
+        ? [
+            '  "translations": [',
+            '    {"en": "原文的完整句子（逐句，不要合并）", "zh": "这句的中文翻译"}',
+            '  ]',
+          ]
+        : []),
+      '}',
+    ];
 
     return [
       {
@@ -55,26 +73,37 @@
           '7. 拼写必须完全正确。',
           extra ? `8. 额外要求：${extra}` : '',
           '',
+          withTranslation
+            ? '另外，把正文**每一句**的中文翻译放进 translations，en 必须与 paragraphs 里的原句一字不差（含标点），按出现顺序排列。'
+            : '',
+          '',
           '输出 JSON，字段如下：',
-          '{',
-          '  "title": "英文标题（不超过 10 词）",',
-          '  "paragraphs": ["第一段", "第二段", "..."],',
-          '  "words": [',
-          '    {"word": "单词原形", "phonetic": "音标，不确定就留空", "meaning": "中文释义，含词性", "sentence": "文中出现该词的那一句原文"}',
-          '  ]',
-          '}',
+          ...schema,
         ].filter(Boolean).join('\n'),
       },
     ];
   }
 
+  /** 从模型输出里抠出 JSON（对象或数组都行） */
   function extractJson(text) {
     if (!text) return null;
     let s = String(text).trim();
     s = s.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
-    const start = s.indexOf('{');
-    const end = s.lastIndexOf('}');
+
+    const braceAt = s.indexOf('{');
+    const bracketAt = s.indexOf('[');
+    let start = -1;
+    let end = -1;
+
+    if (bracketAt !== -1 && (braceAt === -1 || bracketAt < braceAt)) {
+      start = bracketAt;
+      end = s.lastIndexOf(']');
+    } else {
+      start = braceAt;
+      end = s.lastIndexOf('}');
+    }
     if (start === -1 || end === -1 || end <= start) return null;
+
     const slice = s.slice(start, end + 1);
     try {
       return JSON.parse(slice);
@@ -132,12 +161,63 @@
     return new RegExp(`\\b${escapeRe(word)}\\w{0,3}\\b`, 'i').test(text);
   }
 
+  /** 不依赖 lookbehind 的分句（老版 iOS Safari 不支持 lookbehind） */
+  function splitSentences(paragraph) {
+    const s = String(paragraph || '');
+    const out = [];
+    let start = 0;
+    for (let i = 0; i < s.length; i++) {
+      const ch = s[i];
+      if (ch !== '.' && ch !== '!' && ch !== '?') continue;
+
+      let j = i + 1;
+      while (j < s.length && /["'”’)\]]/.test(s[j])) j++;
+      const nextIsBreak = j >= s.length || /\s/.test(s[j]);
+      if (!nextIsBreak) continue;
+
+      const piece = s.slice(start, j).trim();
+      if (piece) out.push(piece);
+      start = j;
+      i = j - 1;
+    }
+    const tail = s.slice(start).trim();
+    if (tail) out.push(tail);
+    return out;
+  }
+
+  /** 比对句子用：去掉多余空格、统一引号、忽略大小写与末尾标点 */
+  function sentenceKey(s) {
+    return String(s || '')
+      .replace(/[‘’]/g, "'")
+      .replace(/[“”]/g, '"')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase()
+      .replace(/[.!?,;:]+$/, '');
+  }
+
   function findSentence(text, word) {
     if (!word) return '';
     const re = new RegExp(`\\b${escapeRe(word)}\\w{0,3}\\b`, 'i');
-    const sentences = String(text).split(/(?<=[.!?])\s+/);
-    const hit = sentences.find((s) => re.test(s));
+    const hit = splitSentences(text).find((s) => re.test(s));
     return hit ? hit.trim() : '';
+  }
+
+  function normalizeTranslations(raw) {
+    if (!Array.isArray(raw)) return [];
+    const out = [];
+    const seen = new Set();
+    for (const t of raw) {
+      if (!t || typeof t !== 'object') continue;
+      const en = String(t.en || t.sentence || t.text || '').trim();
+      const zh = String(t.zh || t.translation || t.cn || '').trim();
+      if (!en || !zh) continue;
+      const key = sentenceKey(en);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ en, zh });
+    }
+    return out;
   }
 
   function normalizeArticle(raw, words, engine) {
@@ -176,6 +256,7 @@
       title: String(raw.title || 'Untitled').trim(),
       paragraphs,
       words: entries,
+      translations: normalizeTranslations(raw.translations),
       engine,
       text,
       missing: words.filter((w) => !containsWord(text, w.word)).map((w) => w.word),
@@ -263,6 +344,71 @@
     };
   }
 
+  /**
+   * 给没有释义的单词补上音标和中文释义（用模型，一次 40 个）。
+   * 返回 { items: [{word, phonetic, meaning}], failed: [{word, error}] }
+   */
+  async function enrichWords(words, llm) {
+    const list = (words || []).filter((w) => w && w.word);
+    if (!list.length) return { items: [], failed: [] };
+    if (!llm || !llm.apiKey || !llm.baseUrl) {
+      const err = new Error('需要先配置模型才能自动补全释义');
+      err.code = 'NO_LLM';
+      throw err;
+    }
+
+    const items = [];
+    const failed = [];
+
+    for (let i = 0; i < list.length; i += 40) {
+      const chunk = list.slice(i, i + 40);
+      const messages = [
+        {
+          role: 'system',
+          content:
+            '你是英语词典编辑。给用户提供的英文单词标注 IPA 音标和中文释义。' +
+            '只输出 JSON 数组，不要任何解释或代码块标记。',
+        },
+        {
+          role: 'user',
+          content: [
+            '为下面每个单词给出：',
+            '- phonetic：英式或美式 IPA，用 / / 包起来',
+            '- meaning：中文释义，必须以词性缩写开头，如 "v. 放弃；抛弃"、"adj. 易碎的"；若有多个词性，用分号隔开',
+            '',
+            '单词列表：',
+            chunk.map((w) => w.word).join(', '),
+            '',
+            '输出格式（数组长度必须与单词数量一致，顺序一致）：',
+            '[{"word":"abandon","phonetic":"/əˈbændən/","meaning":"v. 放弃；抛弃"}]',
+          ].join('\n'),
+        },
+      ];
+
+      try {
+        const content = await callLLM(messages, llm);
+        const raw = extractJson(content);
+        const arr = Array.isArray(raw) ? raw : raw && Array.isArray(raw.words) ? raw.words : [];
+        const want = new Set(chunk.map((w) => w.word.toLowerCase()));
+
+        for (const e of arr) {
+          if (!e || typeof e !== 'object') continue;
+          const key = String(e.word || '').trim().toLowerCase();
+          if (!want.has(key)) continue;
+          items.push({
+            word: key,
+            phonetic: String(e.phonetic || '').trim(),
+            meaning: String(e.meaning || '').trim(),
+          });
+        }
+      } catch (err) {
+        for (const w of chunk) failed.push({ word: w.word, error: err.message });
+      }
+    }
+
+    return { items, failed };
+  }
+
   async function generateArticle(words, opts, llm) {
     if (!words.length) throw new Error('没有可用的单词');
     llm = llm || {};
@@ -291,6 +437,10 @@
     offlineArticle,
     findSentence,
     containsWord,
+    splitSentences,
+    sentenceKey,
+    normalizeTranslations,
+    enrichWords,
     generateArticle,
   };
 });
